@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
-from pyspark.sql.types import *
+from pyspark.sql.functions import udf, col
+from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType
 import re
 import html
 import psycopg2
@@ -11,8 +11,15 @@ def read_tags_raw(tags_string):  # converts <tag1><tag2> to ['tag1', 'tag2']
 
 
 pattern = re.compile(' ([A-Za-z]+)="([^"]*)"')
-parse_line = lambda line: {key: value for key, value in pattern.findall(line)}
+
+
+# parse_line = lambda line: {key: value for key, value in pattern.findall(line)}
+def parse_line(line):
+    return {key: value for key, value in pattern.findall(line)}
+
+
 unescape = udf(lambda escaped: html.unescape(escaped) if escaped else None)
+
 read_tags = udf(read_tags_raw, ArrayType(StringType()))
 
 
@@ -45,9 +52,9 @@ def convert_posts(spark, link):
     )
 
 
-def create_udf(function, returnType):
+def create_udf(function, returntype):
     """Generic template for producing udf's for spark"""
-    return udf(lambda x: function(x), returnType=returnType())
+    return udf(lambda x: function(x), returnType=returntype())
 
 
 def quiet_logs(spark):
@@ -58,7 +65,7 @@ def quiet_logs(spark):
     return None
 
 
-def process_atom(link='s3a://stackoverflow.insight/atom.xml'):
+def process_atom(spark, password, link='s3a://stackoverflow.insight/atom.xml'):
     """Downloads a single atom of data (i.e. a single stack exchange post).
     Then parses the XML via convert_posts, selects out a few noteworthy columns, computes a new column (length of post),
      and then attempts to insert into a Postgres table.
@@ -78,7 +85,7 @@ def process_atom(link='s3a://stackoverflow.insight/atom.xml'):
     atom_Tags = atom_trans.first()[2]
     atom_Length = atom_trans.first()[3]
     connection = psycopg2.connect(host='ec2-3-231-23-29.compute-1.amazonaws.com', database='test_1', user='postgres',
-                                  password='plastik')
+                                  password=password)
     cursor = connection.cursor()
     try:
         cursor.execute(
@@ -104,45 +111,20 @@ def process_atom(link='s3a://stackoverflow.insight/atom.xml'):
     return atom_trans
 
 
+def process_two_atoms(spark, link='s3a://stackoverflow.insight/two_atoms.xml'):
+    atom = convert_posts(spark=spark, link=link)
+    atom_small = atom.select('Id', 'Body', 'Tags')
+    udf_func = create_udf(len, IntegerType)
+    atom_trans = atom_small.withColumn('Length', udf_func(atom_small.Body))
+    print('And here are two atoms:')
+    print(atom_trans.show())
+
+    return atom_trans
+
+
 if __name__ == "__main__":
-    spark = SparkSession.builder.appName("MainTransformation").getOrCreate()
-    quiet_logs(spark)
-    process_atom()
+    spark_ = SparkSession.builder.appName("MainTransformation").getOrCreate()
+    quiet_logs(spark_)
+    process_atom(spark_, 'plastik')
+    process_two_atoms(spark_)
 
-    # DEPRECATED CODE
-    # atom = convert_posts(spark=spark, link='s3a://stackoverflow.insight/atom.xml')
-    # atom_small = atom.select('Id', 'Body', 'Tags')
-    # udf_func = create_udf(len, IntegerType)
-    # atom_trans = atom_small.withColumn('Length', udf_func(atom_small.Body))
-
-    # print('Here is the dataframe schema')
-    # print(atom_trans)
-    # print("And here is the atom with .show()")
-    # print(atom_trans.show())
-    # for item in atom_trans.first():
-    #     print(item)
-
-    # atom_Id = atom_trans.first()[0]
-    # atom_Body = atom_trans.first()[1]
-    # atom_Tags = atom_trans.first()[2]
-    # atom_Length = atom_trans.first()[3]
-
-    # connection = psycopg2.connect(host='ec2-3-231-23-29.compute-1.amazonaws.com', database='test_1', user='postgres',
-    #                               password='plastik')
-    # cursor = connection.cursor()
-
-    # Sample postgres insertion
-    # cursor.execute("""INSERT INTO test_1 (Id, Body, Tags, Length) VALUES (%(id)s, %(body)s, %(tags)s, %(length)s);""",
-    #               {'id': atom_Id, 'body': atom_Body, 'tags': atom_Tags, 'length': atom_Length})
-    # connection.commit()  # Important!
-    # cursor.execute('''SELECT * FROM test_1''')
-    # print(cursor.fetchall())
-    # cursor.close()
-    # connection.close()
-
-#     spark = SparkSession.builder.appName("MainTransformation").getOrCreate()
-#     converted = convert_posts(spark, 's3a://stackoverflow.insight/mathoverflow/Posts.xml')
-#     atom = converted.first()
-#     print("The first row of your dataframe is:")
-#     print(atom)
-#     print(type(atom))
