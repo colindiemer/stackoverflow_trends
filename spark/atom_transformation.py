@@ -4,6 +4,7 @@ from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType
 import re
 import html
 import psycopg2
+import os
 
 
 def read_tags_raw(tags_string):  # converts <tag1><tag2> to ['tag1', 'tag2']
@@ -65,11 +66,10 @@ def quiet_logs(spark):
     return None
 
 
-def process_atom(spark, password, link='s3a://stackoverflow.insight/atom.xml'):
+def process_atom(spark, link=S3_bucket+'atom.xml', , host=POSTGRES_DNS, table='test_1', password=POSTGRES_PASSWORD, user='postgres'):
     """Downloads a single atom of data (i.e. a single stack exchange post).
     Then parses the XML via convert_posts, selects out a few noteworthy columns, computes a new column (length of post),
      and then attempts to insert into a Postgres table.
-     Makes various print statements to help with debugging.
     """
 
     atom = convert_posts(spark=spark, link=link)
@@ -84,7 +84,7 @@ def process_atom(spark, password, link='s3a://stackoverflow.insight/atom.xml'):
     atom_Body = atom_trans.first()[1]
     atom_Tags = atom_trans.first()[2]
     atom_Length = atom_trans.first()[3]
-    connection = psycopg2.connect(host='ec2-3-231-23-29.compute-1.amazonaws.com', database='test_1', user='postgres',
+    connection = psycopg2.connect(host=host, database=table, user=user,
                                   password=password)
     cursor = connection.cursor()
     try:
@@ -111,7 +111,7 @@ def process_atom(spark, password, link='s3a://stackoverflow.insight/atom.xml'):
     return atom_trans
 
 
-def process_two_atoms(spark, link='s3a://stackoverflow.insight/two_atoms.xml'):
+def process_two_atoms(spark, link= S3_bucket+'two_atoms.xml'):
     atom = convert_posts(spark=spark, link=link)
     atom_small = atom.select('Id', 'Body', 'Tags')
     udf_func = create_udf(len, IntegerType)
@@ -123,8 +123,13 @@ def process_two_atoms(spark, link='s3a://stackoverflow.insight/two_atoms.xml'):
 
 
 if __name__ == "__main__":
+
+    S3_bucket = os.environ("S3_BUCKET")
+    POSTGRES_PASSWORD = os.environ("POSTGRES_PASSWORD")
+    POSTGRES_DNS = os.environ("POSTGRES_DNS")
+
     spark_ = SparkSession.builder.appName("MainTransformation").getOrCreate()
     quiet_logs(spark_)
-    process_atom(spark_, 'plastik')
+    process_atom(spark_)
     process_two_atoms(spark_)
 
