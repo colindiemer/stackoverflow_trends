@@ -2,8 +2,6 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import udf, col, regexp_replace, split, coalesce, array, when
 from pyspark.sql.functions import lower as lower_
 from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF
-from pyspark.ml import Pipeline
 import re
 import html
 import psycopg2
@@ -44,7 +42,7 @@ def blank_as_null(x):
     return when(col(x) != "", col(x)).otherwise("")
 
 
-def convert_posts(spark, link, clean_text=True):
+def convert_posts(spark, link):
     """Reads in raw XML file of posts from a link and processes the XML into a spark dataframe.
     """
     parsed = spark.read.text(link).where(col('value').like('%<row Id%')) \
@@ -70,48 +68,8 @@ def convert_posts(spark, link, clean_text=True):
         col('value.AnswerCount').cast('integer'),
         col('value.CommentCount').cast('integer'),
         col('value.FavoriteCount').cast('integer'))
-    if not clean_text:
-        return parsed
-    else:
-        cleaned = parsed.withColumn("Body_clean", clean_string(parsed['Body']))
-        cleaned = cleaned.withColumn("Title_clean", clean_string(parsed['Title']))
-        cleaned = cleaned.withColumn("Body_clean", blank_as_null("Body_clean"))
-        cleaned = cleaned.withColumn("Title_clean", blank_as_null("Title_clean"))
 
-        title_tokenizer = Tokenizer(inputCol="Title_clean", outputCol="Title_tokens")
-        title_stop_remover = StopWordsRemover(inputCol=title_tokenizer.getOutputCol(), outputCol="Title_tokens_stopped")
-        title_pipeline = Pipeline(stages=[title_tokenizer, title_stop_remover])
-
-        title_model = title_pipeline.fit(cleaned)
-        processed_title = title_model.transform(cleaned)
-
-        body_tokenizer = Tokenizer(inputCol="Body_clean", outputCol="Body_tokens")
-        body_stop_remover = StopWordsRemover(inputCol=body_tokenizer.getOutputCol(), outputCol="Body_tokens_stopped")
-        body_count = CountVectorizer(inputCol=body_stop_remover.getOutputCol(), outputCol="body_features_raw")
-        body_idf = IDF(inputCol=body_count.getOutputCol(), outputCol="body_features", minDocFreq=5)
-
-        body_pipeline = Pipeline(stages=[body_tokenizer, body_stop_remover, body_count, body_idf])
-
-        body_model = body_pipeline.fit(processed_title)
-        processed_body = body_model.transform(processed_title)
-
-        body_vocab = body_model.stages[-2].vocabulary
-
-        return processed_body
-
-        # body_tokenizer = Tokenizer(inputCol="Body_clean", outputCol="Body_clean_token")
-        # title_tokenizer = Tokenizer(inputCol="Title_clean", outputCol="Title_clean_token")
-        # cleaned = body_tokenizer.transform(cleaned)
-        # cleaned = title_tokenizer.transform(cleaned)
-        # title_stopwords = StopWordsRemover()
-        # title_stopwords.setInputCol("Title_clean_token")
-        # title_stopwords.setOutputCol("Title_final_token")
-        # cleaned = title_stopwords.transform(cleaned)
-        # body_stopwords = StopWordsRemover()
-        # body_stopwords.setInputCol("Body_clean_token")
-        # body_stopwords.setOutputCol("Body_final_token")
-        # cleaned = body_stopwords.transform(cleaned)
-        # return cleaned
+    return parsed
 
 
 def quiet_logs(spark):
@@ -122,16 +80,7 @@ def quiet_logs(spark):
     return None
 
 
-S3_bucket = os.environ["S3_BUCKET"]
-POSTGRES_DNS = os.environ["POSTGRES_DNS"]
-POSTGRES_PASSWORD = os.environ["POSTGRES_PASSWORD"]
-
-
-def postgres_insert_atom(dataframe,
-                         host=POSTGRES_DNS,
-                         table='test_1',
-                         password=POSTGRES_PASSWORD,
-                         user='postgres'):
+def postgres_insert_atom(dataframe, host, table, password, user):
     """Sample insertion into PostgreSQL database. Only inserts a single atom of data. """
     atom_id = dataframe.first()[0]
     atom_body = dataframe.first()[1]
@@ -165,7 +114,7 @@ def postgres_insert_atom(dataframe,
 
 
 def process_atom(
-        spark, link=S3_bucket + 'atom.xml', postgres_insert=True):
+        spark, link, host, table, password, user, postgres_insert=True):
     """Downloads a single atom of data (i.e. a single stack exchange post).
     Then parses the XML via convert_posts, selects out a few noteworthy columns, computes a new column (length of post),
      and then attempts to insert into a Postgres table.
@@ -173,7 +122,6 @@ def process_atom(
 
     atom = convert_posts(spark=spark, link=link)
     atom_small = atom.select('Id', 'Body', 'Tags')
-    # udf_func = create_udf(len, IntegerType)
     udf_func = udf(lambda x: len(x), returnType=IntegerType())
     atom_trans = atom_small.withColumn('Length', udf_func(atom_small.Body))
     print('Here is the dataframe schema')
@@ -181,15 +129,14 @@ def process_atom(
     print("And here is the atom with .show()")
     print(atom_trans.show())
     if postgres_insert:
-        postgres_insert_atom(atom_trans)
+        postgres_insert_atom(atom_trans, host, table, password, user)
 
     return atom_trans
 
 
-def process_two_atoms(spark, link=S3_bucket + 'two_atoms.xml'):
+def process_two_atoms(spark, link):
     atom = convert_posts(spark=spark, link=link)
     atom_small = atom.select('Id', 'Body', 'Tags')
-    # udf_func = create_udf(len, IntegerType)
     udf_func = udf(lambda x: len(x), returnType=IntegerType())
     atom_trans = atom_small.withColumn('Length', udf_func(atom_small.Body))
     print('And here are two atoms:')
@@ -198,22 +145,17 @@ def process_two_atoms(spark, link=S3_bucket + 'two_atoms.xml'):
     return atom_trans
 
 
-def process_mathoverflow(spark, link=S3_bucket + 'mathoverflow/Posts.xml', clean_text=True):
-    """Load and process mathoverflow (medium sized example)"""
-    mo = convert_posts(spark=spark, link=link, clean_text=clean_text)
-    if not clean_text:
-            mo_essential = mo['Id', 'Body', 'Title', 'Tags']
-        else:
-            mo_essential = mo[
-                'Id', 'PostTypeId', 'ParentId', "Body_tokens_stopped", "body_features", "Title_tokens_stopped", 'Tags']
-        print(mo_essential.printSchema())
-        print(mo_essential.show(10))
-
-
-
 if __name__ == "__main__":
     spark_ = SparkSession.builder.appName("MainTransformation").getOrCreate()
     quiet_logs(spark_)
-    # process_atom(spark_)
-    # process_two_atoms(spark_)
-    process_mathoverflow(spark_)
+
+    S3_bucket = os.environ["S3_BUCKET"]
+    host_ = os.environ["POSTGRES_DNS"]
+    password_ = os.environ["POSTGRES_PASSWORD"]
+    table_ = 'test_1'
+    user_ = 'postgres'
+    link_1 = S3_bucket + 'atom.xml'
+    link_2 = S3_bucket + 'two_atoms.xml'
+
+    process_atom(spark_, link_1, host_, table_, password_, user_)
+    process_two_atoms(spark_, link_2)
