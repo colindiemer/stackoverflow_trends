@@ -1,10 +1,11 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import \
-    udf, col, regexp_replace, split, coalesce, array, when, slice, lit, to_date
+    udf, col, regexp_replace, split, coalesce, array, \
+    when, slice, lit, to_date, arrays_zip, sort_array, \
+    explode, collect_list, count
 from pyspark.sql.functions import lower as lower_
 from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType, DoubleType
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF
-from pyspark.ml.clustering import LDA
 from pyspark.ml import Pipeline
 import re
 import html
@@ -78,13 +79,6 @@ def convert_posts(spark, link, clean_text=True):
         return process_text(parsed)
 
 
-def vector_to_array(col):
-    """Converts vector type to python list.
-    Seemingly necessary to work with SparseVector outputs of IDF Frustratingly, there seems to be no way to avoid a udf here."""
-    return udf(lambda x: x.toArray().tolist(), ArrayType(DoubleType()))(col)
-    # return udf(lambda x: x.toArray(), ArrayType(DoubleType()))(col)
-
-
 def process_text(parsed_dataframe):
     """Given a dataframe of parsed Stackoverflow posts, performs basic NLP cleaning operations
      (those in clean_string as well as removing stop words and splitting into tokens.
@@ -104,6 +98,7 @@ def body_pipeline(cleaned_dataframe):
     body_stop_remover = StopWordsRemover(inputCol=body_tokenizer.getOutputCol(), outputCol="Body_tokens_stopped")
     body_count = CountVectorizer(inputCol=body_stop_remover.getOutputCol(), outputCol="body_counts_raw")
     body_idf = IDF(inputCol=body_count.getOutputCol(), outputCol="features")
+
     pipeline = Pipeline(stages=[body_tokenizer, body_stop_remover, body_count, body_idf])
 
     body_model = pipeline.fit(cleaned_dataframe)
@@ -111,14 +106,30 @@ def body_pipeline(cleaned_dataframe):
 
     body_vocab = body_model.stages[-2].vocabulary
 
-    # lda = LDA(k=10, maxIter=10)
-    # lda_model = lda.fit(featurized_data)
-    # top_doc_table = lda_model.transform(featurized_data)
-    #
-    # topics = lda_model.topicsMatrix().toArray()
-    # featurized_data = featurized_data.withColumn('body_idf', vector_to_array(body_idf.getOutputCol()))
-
     return featurized_data, body_vocab
+
+
+def extract_top_keywords(posts, n_keywords=10):
+    def extract_keys_from_vector(vector):
+        return vector.indices.tolist()
+
+    def extract_values_from_vector(vector):
+        return vector.values.tolist()
+
+    extract_keys_from_vector_udf = udf(lambda vector: extract_keys_from_vector(vector), ArrayType(IntegerType()))
+    extract_values_from_vector_udf = udf(lambda vector: extract_values_from_vector(vector), ArrayType(DoubleType()))
+
+    posts = posts.withColumn("extracted_keys", extract_keys_from_vector_udf("features"))
+    posts = posts.withColumn("extracted_values", extract_values_from_vector_udf("features"))
+
+    posts = posts.withColumn("zipped_truncated",
+                             slice(sort_array(arrays_zip("extracted_values", "extracted_keys"), asc=False), 1,
+                                   n_keywords))
+
+    take_second = udf(lambda rows: [row[1] for row in rows], ArrayType(IntegerType()))
+    posts = posts.withColumn("top_indices", take_second("zipped_truncated"))
+
+    return posts
 
 
 def quiet_logs(spark):
@@ -126,11 +137,6 @@ def quiet_logs(spark):
     logger = spark._jvm.org.apache.log4j
     logger.LogManager.getLogger("org").setLevel(logger.Level.ERROR)
     logger.LogManager.getLogger("akka").setLevel(logger.Level.ERROR)
-    return None
-
-
-def jdbc_write_postgresql(dataframe, db_url, table, mode, properties):
-    dataframe.write.jdbc(url=db_url, table=table, mode=mode, properties=properties)
     return None
 
 
@@ -142,9 +148,9 @@ def write_to_redis(host, dataframe, vocab, cutoff=10000):
         for id_, tokens in id_tokens:
             if word in tokens:
                 r.rpush(word, id_)
-    print('Inserted into redis!')
-    print('Keys:')
-    print(vocab[:100])
+    # print('Inserted into redis!')
+    # print('Keys:')
+    # print(vocab[:100])
     return None
 
 
@@ -153,20 +159,32 @@ if __name__ == "__main__":
     quiet_logs(spark_)
 
     S3_bucket = os.environ["S3_BUCKET"]
+
     link_atoms = S3_bucket + 'two_atoms.xml'
     link_mo = S3_bucket + 'mathoverflow/Posts.xml'
     link_all = S3_bucket + 'Posts.xml'
 
-    cols = ['Id', 'PostTypeId', 'Body', 'Body_tokens_stopped', "features"]
+    cols = ['Id',
+            'PostTypeId',
+            'Body',
+            "features",
+            "zipped_truncated",
+            "keyword_index"]
 
-    cleaned_posts = convert_posts(spark_, link_atoms)
-    output_posts, vocab = body_pipeline(cleaned_posts)
+    cleaned_posts = convert_posts(spark_, link_mo)
+    output_posts, vocab_ = body_pipeline(cleaned_posts)
+    keyworded_posts = extract_top_keywords(output_posts)
 
-    print(output_posts[cols].show(10))
-    print(vocab)
+    exploded = keyworded_posts.withColumn('keyword_index', explode('top_indices'))
+
+    # print(exploded.printSchema())
+    # print(exploded[cols].show(12))
+
+    unexploded = exploded.groupby("keyword_index").agg(
+        collect_list("Id"), count("Id"), collect_list("PostTypeId"), count("PostTypeId"))
+
+    print(unexploded.show(10))
+
+    #.agg(fn.mean("dep_time").alias("avg_dep"), fn.mean("arr_time")
 
     # write_to_redis(os.environ["POSTGRES_DNS"], posts, vocab_)
-    # postgres_url = os.environ["POSTGRES_DNS"] + ':5432/'
-    # postgres_password = os.environ["POSTGRES_PASSWORD"]
-    # properties_ = {'user': 'postgres', 'password': postgres_password, 'driver': 'org.postgresql.Driver'}
-    # jdbc_write_postgresql(df, 'jdbc:%s' % postgres_url, 'jdbc_test', 'overwrite', properties_)
