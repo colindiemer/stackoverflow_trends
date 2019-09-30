@@ -27,16 +27,6 @@ def parse_line(line):
     return {key: value for key, value in regex.findall(line)}
 
 
-def clean_string(s):
-    """Performs the following in PySpark: makes string lowercase, removes whitespace characters,
-    removes markup tags, and removes punctuation."""
-    s = lower_(s)
-    s = regexp_replace(s, "\n", "")
-    s = regexp_replace(s, "<[^>]*>", "")  # remove markup tags
-    s = regexp_replace(s, "[^\w\s]", "")
-    return s
-
-
 def unescape():
     return udf(lambda text: html.unescape(text) if text else None)
 
@@ -48,7 +38,8 @@ def blank_as_null(x):
 
 
 def convert_posts(spark, link, clean_text=True):
-    """Reads in raw XML file of posts from a link and processes the XML into a spark dataframe.
+    """Reads in raw XML file of stackoverflow posts from a link
+    and processes the XML into a spark dataframe.
     """
     parsed = spark.read.text(link).where(col('value').like('%<row Id%')) \
         .select(udf(parse_line, MapType(StringType(), StringType()))('value').alias('value')) \
@@ -80,9 +71,18 @@ def convert_posts(spark, link, clean_text=True):
 
 
 def process_text(parsed_dataframe):
-    """Given a dataframe of parsed Stackoverflow posts, performs basic NLP cleaning operations
-     (those in clean_string as well as removing stop words and splitting into tokens.
-     Tokenized posts and titles are then fed into TF-IDF."""
+    """Given a dataframe of parsed Stackoverflow posts, performs basic text cleaning operations
+     on each textual column"""
+
+    def clean_string(s):
+        """Performs the following in PySpark: makes string lowercase, removes whitespace characters,
+        removes markup tags, and removes punctuation."""
+        s = lower_(s)
+        s = regexp_replace(s, "\n", "")
+        s = regexp_replace(s, "<[^>]*>", "")  # remove markup tags
+        #s = regexp_replace(s, "[^\w\s]", "")  # remove punctuation
+        s = regexp_replace(s, "[^\w\\s]", "")  # remove punctuation
+        return s
 
     cleaned = parsed_dataframe.withColumn("Body_clean", clean_string(parsed_dataframe['Body']))
     cleaned = cleaned.withColumn("Title_clean", clean_string(parsed_dataframe['Title']))
@@ -94,6 +94,9 @@ def process_text(parsed_dataframe):
 
 
 def body_pipeline(cleaned_dataframe):
+    """NLP pipeline. Tokenizes, removes stopwords, and computes TF-IDF
+    Returns transformed data and the vocabulary of words."""
+
     body_tokenizer = Tokenizer(inputCol="Body_clean", outputCol="Body_tokens")
     body_stop_remover = StopWordsRemover(inputCol=body_tokenizer.getOutputCol(), outputCol="Body_tokens_stopped")
     body_count = CountVectorizer(inputCol=body_stop_remover.getOutputCol(), outputCol="body_counts_raw")
@@ -104,12 +107,12 @@ def body_pipeline(cleaned_dataframe):
     body_model = pipeline.fit(cleaned_dataframe)
     featurized_data = body_model.transform(cleaned_dataframe)
 
-    body_vocab = body_model.stages[-2].vocabulary
-
-    return featurized_data, body_vocab
+    return featurized_data, body_model.stages[-2].vocabulary
 
 
 def extract_top_keywords(posts, n_keywords=10):
+    """Given TF-IDF output (as "features" column) extracts out the index location of the
+    10 keywords with highest TF-IDF (for each post)."""
     def extract_keys_from_vector(vector):
         return vector.indices.tolist()
 
@@ -148,9 +151,6 @@ def write_to_redis(host, dataframe, vocab, cutoff=10000):
         for id_, tokens in id_tokens:
             if word in tokens:
                 r.rpush(word, id_)
-    # print('Inserted into redis!')
-    # print('Keys:')
-    # print(vocab[:100])
     return None
 
 
@@ -185,6 +185,5 @@ if __name__ == "__main__":
 
     print(unexploded.show(10))
 
-    #.agg(fn.mean("dep_time").alias("avg_dep"), fn.mean("arr_time")
 
     # write_to_redis(os.environ["POSTGRES_DNS"], posts, vocab_)
