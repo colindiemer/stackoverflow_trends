@@ -22,4 +22,14 @@ if __name__ == "__main__":
     df.show()
 
     df.write.format("org.apache.spark.sql.redis").option(
-       "table", "test_table_1").option("key.column", "test_a").save()
+       "table", "test_table_1").option("key.column", "test_a").mode("overwrite").save()
+
+    test = spark.read.format(
+        "org.apache.spark.sql.redis").option(
+        "keys.pattern", "test_table_1:*").option(
+        "infer.schema", True).option(
+        "key.column", "test_a").load()
+
+    print(test.printSchema())
+    print(test.show())
+
