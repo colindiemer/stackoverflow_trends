@@ -15,7 +15,7 @@ def read_one_from_redis(table, keyword_index):
     dates_extract = list(read.values())[0].decode("utf-8")  # extract bytecode
     dates_only = dates_extract[13:-1]  # Removes WrappedArray(...) bytecode
     dates_split = [s.strip() for s in dates_only.split(',')]
-    dates_formatted = [datetime.strptime(date, '%Y-%m-%d').date() for date in dates_split]
+    dates_formatted = ['{:%Y-%m}'.format(datetime.strptime(date, '%Y-%m-%d')) for date in dates_split]
     return dates_formatted
 
 
@@ -25,9 +25,16 @@ def datetime_x_y(dates_with_repetitions):
     counts = [dates_counter[date] for date in dates]
     return dates, counts
 
+# tag = 'ag.algebraic-geometry'
+# keyword = 'category'
 
-r = redis.Redis(host=os.environ["POSTGRES_DNS"], port=6379, db=0)
-test = read_one_from_redis('mo_test_1', '349')
+tag = 'ag.algebraic-geometry'
+keyword = 'derived'
+
+r = redis.Redis(host=os.environ["REDIS_DNS"], port=6379, db=0)
+test = read_one_from_redis('ag.algebraic-geometry', 'category')
+
+
 
 app = dash.Dash('Dash Hello World')
 
@@ -35,8 +42,10 @@ text_style = dict(color='#444', fontFamily='sans-serif', fontWeight=300)
 # plotly_figure = dict(data=[dict(x=[1, 2, 3], y=[2, 4, 8])])
 # plotly_figure = dict(data=[dict(x=datetime_x_y(test)[0], y=datetime_x_y(test)[1])])
 
+title = 'Usage of the keyword: \'' + keyword + '\' within the tag: ' + tag
+
 app.layout = html.Div([
-    html.H2('Tag Usage Over Time', style=text_style),
+    html.H2(title, style=text_style),
     dcc.Graph(figure=go.Figure(
         data=[go.Bar(
             x=datetime_x_y(test)[0],

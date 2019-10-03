@@ -20,20 +20,20 @@ if __name__ == "__main__":
         .getOrCreate()
     quiet_logs(spark_)
 
-    # a = [5, 4, 3, 2, 1]
-    # b = [0, 2, 4, 6, 8]
-    # df = spark_.createDataFrame(zip(a, b), schema=['test_a', 'test_b'])
-    # df.show()
-    # df.write\
-    #     .format("org.apache.spark.sql.cassandra")\
-    #     .mode('append')\
-    #     .options(table="kv", keyspace="test")\
-    #     .save()
-    # print('Dataframe written to Cassandra')
+    a = [5, 4, 3, 2, 1]
+    b = [0, 2, 4, 6, 8]
+    df = spark_.createDataFrame(zip(a, b), schema=['test_a', 'test_b'])
+    df.show()
+    df.write\
+        .format("org.apache.spark.sql.cassandra")\
+        .mode('append')\
+        .options(table="kv", keyspace="test")\
+        .save()
+    print('Dataframe written to Cassandra')
 
     read_df = spark_.read\
         .format("org.apache.spark.sql.cassandra")\
         .options(table="emp", keyspace="dev")\
-        .load().show()
+        .load()
     print('Dataframe read from Cassandra')
     read_df.show()

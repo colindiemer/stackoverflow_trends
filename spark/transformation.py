@@ -253,4 +253,5 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 1, link_all, link_all_tags)
+    process_all_and_write_to_redis(spark_, 1, link_mo, link_mo_tags)
+    process_all_and_write_to_redis(spark_, 2, link_mo, link_mo_tags)
