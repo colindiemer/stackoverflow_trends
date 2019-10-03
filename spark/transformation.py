@@ -196,7 +196,10 @@ def explode_group_filter(keyword_posts, vocab, n_words=50, vocab_lookup=False):
     unexploded = unexploded.sort('n_posts', ascending=False).limit(n_words)
 
     if vocab_lookup:
-        vocab_dict = {k: v for k, v in enumerate(vocab)}
+        max_index = unexploded.agg({"keyword_index": "max"}).collect()[0][0]
+        small_vocab = vocab[:max_index + 1]  # vocabulary is sorted by total word count. Only lookup possible words.
+
+        vocab_dict = {k: v for k, v in enumerate(small_vocab)}
         vocab_mapping = create_map([lit(x) for x in chain(*vocab_dict.items())])
         unexploded = unexploded.withColumn("keyword_literal", vocab_mapping.getItem(col("keyword_index")))
 
@@ -223,9 +226,9 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
     tag_transferred = tag_transfer(cleaned_posts)
     tag_selected = select_with_tag(tag_transferred, tag)
     output_posts, vocabulary = body_pipeline(tag_selected)
-    small_vocab = vocabulary[:1000]  # vocabulary is sorted by total word count. So only small part of it needed.
+
     keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
-    final = explode_group_filter(keyworded_posts, small_vocab, vocab_lookup=True)
+    final = explode_group_filter(keyworded_posts, vocabulary, vocab_lookup=True)
     final = final['keyword_literal', 'collect_list(CreationDate)']
 
     final.write.format("org.apache.spark.sql.redis").option(
@@ -238,7 +241,7 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
 if __name__ == "__main__":
     spark_ = SparkSession.builder.appName(
         "MainTransformation").config(
-        "spark.redis.host", os.environ["POSTGRES_DNS"]).getOrCreate()
+        "spark.redis.host", os.environ["REDIS_DNS"]).getOrCreate()
     quiet_logs(spark_)
 
     S3_bucket = os.environ["S3_BUCKET"]
@@ -250,4 +253,4 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 1, link_mo, link_mo_tags)
+    process_all_and_write_to_redis(spark_, 1, link_all, link_all_tags)

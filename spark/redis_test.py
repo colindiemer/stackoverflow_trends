@@ -12,7 +12,7 @@ def quiet_logs(spark):
 
 if __name__ == "__main__":
     spark = SparkSession.builder.appName(
-        "RedisTestWrite").config("spark.redis.host", os.environ["POSTGRES_DNS"]).getOrCreate()
+        "RedisTestWrite").config("spark.redis.host", os.environ["REDIS_DNS"]).getOrCreate()
 
     a = [5, 4, 3, 2, 1]
     b = [0, 2, 4, 6, 8]
