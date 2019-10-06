@@ -215,7 +215,7 @@ def quiet_logs(spark):
     return None
 
 
-def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
+def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link, redis=True):
     """Runs all of the processing steps defined above in order, for a given tag.
     Writes resulting dataframe to Redis.
     """
@@ -225,7 +225,7 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
     cleaned_posts = convert_posts(spark, post_link)
     tag_transferred = tag_transfer(cleaned_posts)
     tag_selected = select_with_tag(tag_transferred, tag)
-    tag_selected.persist()
+    #tag_selected.persist()
     output_posts, vocabulary = body_pipeline(tag_selected)
 
     keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
@@ -233,13 +233,16 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
     final = final['keyword_literal', 'collect_list(CreationDate)']
 
     print('Processing complete.')
-    tag_selected.unpersist()
+    #tag_selected.unpersist()
 
+    if redis:
+        final.write.format("org.apache.spark.sql.redis").option(
+            "table", "{}".format(tag)).option("key.column", "keyword_literal").mode("overwrite").save()
 
-    final.write.format("org.apache.spark.sql.redis").option(
-        "table", "{}".format(tag)).option("key.column", "keyword_literal").mode("overwrite").save()
-
-    print('TAG {} INSERTED INTO REDIS'.format(tag))
+        print('TAG {} INSERTED INTO REDIS'.format(tag))
+    else:
+        print(tag)
+        final.show()
     return None
 
 
@@ -258,5 +261,4 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 4, link_mo, link_mo_tags)
-
+    process_all_and_write_to_redis(spark_, 0, link_all, link_all_tags, redis=False)
