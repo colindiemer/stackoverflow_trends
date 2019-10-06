@@ -225,11 +225,16 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link):
     cleaned_posts = convert_posts(spark, post_link)
     tag_transferred = tag_transfer(cleaned_posts)
     tag_selected = select_with_tag(tag_transferred, tag)
+    tag_selected.persist()
     output_posts, vocabulary = body_pipeline(tag_selected)
 
     keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
     final = explode_group_filter(keyworded_posts, vocabulary, vocab_lookup=True)
     final = final['keyword_literal', 'collect_list(CreationDate)']
+
+    print('Processing complete.')
+    tag_selected.unpersist()
+
 
     final.write.format("org.apache.spark.sql.redis").option(
         "table", "{}".format(tag)).option("key.column", "keyword_literal").mode("overwrite").save()
@@ -253,5 +258,5 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 1, link_mo, link_mo_tags)
-    process_all_and_write_to_redis(spark_, 2, link_mo, link_mo_tags)
+    process_all_and_write_to_redis(spark_, 4, link_mo, link_mo_tags)
+
