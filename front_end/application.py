@@ -50,7 +50,8 @@ def choose_random(keys_dictionary):
     return tag, keyword
 
 
-r = redis.Redis(host=os.environ["REDIS_DNS"], port=6379, db=0)
+r = redis.Redis(host=os.environ["REDIS_DNS"], port=6379, db=1)
+
 keys_dict = get_all_compound_keys(r)
 all_tags = list(keys_dict.keys())
 nestedOptions = keys_dict[all_tags[0]]
@@ -115,3 +116,5 @@ def display_graph(selected_value_1, selected_value_2):
 if __name__ == '__main__':
 
     application.run(host=os.environ["DASH_DNS"], port=80)
+
+

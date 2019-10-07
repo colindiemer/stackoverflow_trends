@@ -220,12 +220,13 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link, redis
     Writes resulting dataframe to Redis.
     """
     top_tags = extract_top_tags(convert_tags(spark, tags_link))
+    print(len(top_tags))
     tag = top_tags[which_tag]
 
     cleaned_posts = convert_posts(spark, post_link)
     tag_transferred = tag_transfer(cleaned_posts)
     tag_selected = select_with_tag(tag_transferred, tag)
-    #tag_selected.persist()
+    tag_selected.persist()
     output_posts, vocabulary = body_pipeline(tag_selected)
 
     keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
@@ -233,7 +234,7 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link, redis
     final = final['keyword_literal', 'collect_list(CreationDate)']
 
     print('Processing complete.')
-    #tag_selected.unpersist()
+    tag_selected.unpersist()
 
     if redis:
         final.write.format("org.apache.spark.sql.redis").option(
@@ -249,7 +250,7 @@ def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link, redis
 if __name__ == "__main__":
     spark_ = SparkSession.builder.appName(
         "MainTransformation").config(
-        "spark.redis.host", os.environ["REDIS_DNS"]).getOrCreate()
+        "spark.redis.host", os.environ["REDIS_DNS"]).config('spark.redis.db', 0).getOrCreate()
     quiet_logs(spark_)
 
     S3_bucket = os.environ["S3_BUCKET"]
@@ -261,4 +262,7 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 0, link_all, link_all_tags, redis=False)
+    process_all_and_write_to_redis(spark_, 10, link_all, link_all_tags)
+
+    # for i in range(100):
+    #     process_all_and_write_to_redis(spark_, i, link_mo, link_mo_tags)
