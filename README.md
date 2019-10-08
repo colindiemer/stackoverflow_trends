@@ -1,2 +1,4 @@
 # stackoverflow_trends
-Project for Insight DE 
+Project for Insight DE: analyzing stackoverflow trends.
+
+ 
