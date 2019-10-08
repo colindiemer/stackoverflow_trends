@@ -8,10 +8,10 @@ from datetime import datetime
 from collections import Counter, defaultdict
 import random
 
+
 #######################
 # Querying from Redis #
 #######################
-
 
 
 def get_all_compound_keys(redis):
@@ -24,10 +24,14 @@ def get_all_compound_keys(redis):
     return keys
 
 
+def redis_connect(host=os.environ["REDIS_DNS"], port=6379, db=1):
+    return redis.Redis(host=host, port=port, db=db)
+
+
 def read_one_from_redis(tag, keyword):
     """Given a tag and a keyword, extracts the corresponding value (time series). Converts to months"""
     redis_hash = str(tag) + ":" + str(keyword)
-    read = r.hgetall(redis_hash)
+    read = redis_connect().hgetall(redis_hash)
     dates_extract = list(read.values())[0].decode("utf-8")  # extract bytecode
     dates_only = dates_extract[13:-1]  # Removes WrappedArray(...) bytecode
     dates_split = [s.strip() for s in dates_only.split(',')]
@@ -44,15 +48,22 @@ def datetime_x_y(dates_with_repetitions):
 
 
 def choose_random(keys_dictionary):
-    """For debugging purposes, mostly. Chooses a random tag/keyword pair."""
+    """For debugging purposes. Chooses a random tag/keyword pair."""
     tag = random.choice(list(keys_dictionary.keys()))
     keyword = random.choice(keys_dictionary[tag])
     return tag, keyword
 
 
-r = redis.Redis(host=os.environ["REDIS_DNS"], port=6379, db=1)
+# r = redis.Redis(host='ec2-3-231-23-29.compute-1.amazonaws.com', port=6379, db=1)
 
-keys_dict = get_all_compound_keys(r)
+# def keys_dict():
+#     return get_all_compound_keys(redis_connect())
+#
+# def all_tags(keys_dict):
+#     return list(keys_dict.keys())
+
+
+keys_dict = get_all_compound_keys(redis_connect())
 all_tags = list(keys_dict.keys())
 nestedOptions = keys_dict[all_tags[0]]
 
@@ -114,7 +125,5 @@ def display_graph(selected_value_1, selected_value_2):
 
 
 if __name__ == '__main__':
-
     application.run(host=os.environ["DASH_DNS"], port=80)
-
-
+    # application.run(host='127.0.0.1', port=8050)

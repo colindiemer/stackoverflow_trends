@@ -93,6 +93,11 @@ def extract_top_tags(converted_tags, top=100):
     return top.select("TagName").rdd.flatMap(lambda x: x).collect()
 
 
+def filter_by_date(dataframe, lower_bound="2019-01-01"):
+    """Removed posts from before a date threshold. Useful for debugging. """
+    return dataframe.filter(dataframe["CreationDate"].gt(lit(lower_bound)))
+
+
 def tag_transfer(posts):
     """Creates a new column Tags_All, which, when a post is an answer,
     fills in the tags for the corresponding question. Needed to associate tags to each type of post."""
@@ -135,13 +140,25 @@ def process_text(parsed_dataframe):
     return cleaned
 
 
-def body_pipeline(cleaned_dataframe):
+def generate_stopwords(processed_tags, stopwords_file="stopwords_1000.txt"):
+    stopwords = []
+    with open(stopwords_file, "r") as f:
+        for line in f:
+            stopwords.append(line)
+    stopwords = [word.strip() for word in stopwords]
+    goodwords = [row.TagName.lower() for row in processed_tags.collect()]
+    return list(set(stopwords).difference(goodwords))
+
+
+def body_pipeline(cleaned_dataframe, stopwordlist):
     """NLP pipeline. Tokenizes, removes stopwords, and computes TF-IDF
     Returns transformed data as 'features' and the vocabulary of words."""
 
     tokenizer = Tokenizer(inputCol="Text", outputCol="Text_tokens")
-    stop_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(), outputCol="Text_tokens_stopped")
-    count_vect = CountVectorizer(inputCol=stop_remover.getOutputCol(), outputCol="Text_counts_raw")
+    stop_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(), outputCol="Text_tokens_stopped",
+                                    stopWords=stopwordlist)
+    count_vect = CountVectorizer(
+        inputCol=stop_remover.getOutputCol(), outputCol="Text_counts_raw")
     idf = IDF(inputCol=count_vect.getOutputCol(), outputCol="features")
 
     pipeline = Pipeline(stages=[tokenizer, stop_remover, count_vect, idf])
@@ -215,26 +232,34 @@ def quiet_logs(spark):
     return None
 
 
-def process_all_and_write_to_redis(spark, which_tag, post_link, tags_link, redis=True):
+def process_all_and_write_to_redis(
+        spark, which_tag, post_link, tags_link, redis=True, q_only=False):
     """Runs all of the processing steps defined above in order, for a given tag.
     Writes resulting dataframe to Redis.
     """
-    top_tags = extract_top_tags(convert_tags(spark, tags_link))
-    print(len(top_tags))
+    processed_tags = convert_tags(spark, tags_link)
+    top_tags = extract_top_tags(processed_tags)
     tag = top_tags[which_tag]
-
+    stopwords = generate_stopwords(processed_tags)
     cleaned_posts = convert_posts(spark, post_link)
-    tag_transferred = tag_transfer(cleaned_posts)
-    tag_selected = select_with_tag(tag_transferred, tag)
-    tag_selected.persist()
-    output_posts, vocabulary = body_pipeline(tag_selected)
+
+    if q_only:
+        questions = cleaned_posts.filter((cleaned_posts.PostTypeId == 1))
+        tag_selected = select_with_tag(questions, tag)
+        tag_selected.cache()
+        tag_selected.show()
+    else:
+        tag_transferred = tag_transfer(cleaned_posts)
+        tag_selected = select_with_tag(tag_transferred, tag)
+        tag_selected.cache()
+
+    output_posts, vocabulary = body_pipeline(tag_selected, stopwordlist=stopwords)
 
     keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
     final = explode_group_filter(keyworded_posts, vocabulary, vocab_lookup=True)
     final = final['keyword_literal', 'collect_list(CreationDate)']
 
     print('Processing complete.')
-    tag_selected.unpersist()
 
     if redis:
         final.write.format("org.apache.spark.sql.redis").option(
@@ -262,7 +287,7 @@ if __name__ == "__main__":
     link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
 
-    process_all_and_write_to_redis(spark_, 10, link_all, link_all_tags)
+    process_all_and_write_to_redis(spark_, 97, link_all, link_all_tags, redis=True)
 
     # for i in range(100):
     #     process_all_and_write_to_redis(spark_, i, link_mo, link_mo_tags)
