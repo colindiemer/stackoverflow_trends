@@ -1,5 +1,4 @@
-# stackoverflow_trends
-Project for Insight DE: analyzing stackoverflow trends.
+# Trend Tracker: Stackoverflow and the changing trends in technology. 
 
 Stackoverflow is, in a way, more than just a Q&A site for coders: it steadily documents the way coders use language.
 The goal of this project was to extract keywords from Stackoverflow posts and determine which keywords are associated with which tags, and track how often these keywords are used over time. 
