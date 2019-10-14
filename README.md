@@ -9,15 +9,16 @@ The data used was the entire 70GB file of stackoverflow posts at the data dump: 
 
 Stackexchange enforces a consistent schema amongst the data dumps of it's various sites. In particular, the code will work as expected on any site within the stackexchange network. However, only Stackoverflow has enough user activity to have an archive in the tens of GBs, and so the Spark-job run here is likely overkill on smaller sites. 
 
-## Tech Stack
+## Tech Stack / Pipeline
 
-The files of posts and tags are stores in S3. The data transformation process takes place with PySpark. Benchmarking was done using both Redis and Cassandra as a database for the output tables. Accordingly, code for both is included. Dash/Plotly apps then queries these databases to produce output graphs. 
+The files of posts and tags are stored in S3. The data transformation process takes place with PySpark. Benchmarking was done using both Redis and Cassandra as a database for the output tables. Accordingly, code for both is included, although Cassandra is preferred. Dash/Plotly apps then queries these databases to produce output graphs. 
 
-Of course, in practice there is no reason to use both Redis and Cassandra simultaneously; the user is invited to pick a favorite and only use that. 
+
+![Pipeline](https://i.imgur.com/dlZ2823.png)
 
 ## Environment Variables and Dependencies. 
 
-The following environment variables are used. 
+The following environment variables are used by the transformation `application.py` and the respective Redis/Cassandra front-end Dash/Plotly applications call their respective environment variables too. 
 
 * `S3_BUCKET` - an s3a link to your S3 bucket containing `stackoverflow/Posts.xml` and `stackoverflow/Tags.xml`.  
 * `REDIS_DNS` - an address for the Redis Server
@@ -27,6 +28,27 @@ The following environment variables are used.
 * `CASSANDRA_KEYSPACE` - a name for keyspace used on Cassandra. 
 * `CASSANDRA_TABLE` - a name for the particular Cassandra table. 
 
+## The Data Transformation Process
+
+First, the data set is filtered by those posts given a specified tag (e.g. posts marked "Python"). Answers are associated with the tags of their associated question. The title (if present) and body are combined into the "text" of the post. Then the following text cleaning is performed:
+
+* Punctuation is removed (Sorry `C++`, you now become the same as `C`!)
+* Words are made lower-case
+* Text contained in markup tags (such as code) is removed
+* Stopwords are removed (this is a delicate issue for this project, more on this later!)
+* Text is tokenized
+
+From there, TF-IDF scores were computed. In practice, I found the computation of IDF scores using SparkML's built in IDF disappointingly slow, especially since the process must be run for any tag one wants to consider. Instead, I used an IDF lookup table from the python package `wikiwords`, effectively using IDF scores from common language usage. Because tech words are in much more prevalent use on StackOverflow than on Wikipedia, using these IDF lookups requires some tweaking of stopwords. 
+
+## Stopwords
+
+...are a pain. StackOverflow has some idiosyncratic usage of words and language. 
+
+`transformation.py` will look for two `.txt` files in the same directory: `stopwords_file` (default `stopwords_10000.txt` and the other for `common_tech_words_file` (default `common_tech_words.txt`). The former of these is recommended to be a fairly substantial list of commonly used words. 
+
+The problem is that any sufficiently long list of common words will likely contain some interesting tech words (e.g. 'list', 'class') one may not want to remove. So `transformation.py` looks into the list of the most popular tags, and removes words appearing there from our large list of stopwords. Regretfully, there are some ridiculously broad tags in use on StackOverflow (e.g. "arrays). The `common_tech_words_file` then re-includes these in our list of stopwords. In this way, we get a fairly balanced mixed of interesting, but not overly common, tech words.
+
+Code for the slower pipeline which includes the actual direct IDF calculation is including for benchmarking purposes. It is an interesting data analytics question as to how closely we can match these two keyword extraction techniques via delicate adjustment of stopwords with a general usage IDF lookup. 
 
 
 
