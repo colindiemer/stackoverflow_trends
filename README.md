@@ -39,6 +39,7 @@ First, the data set is filtered by those posts given a specified tag (e.g. posts
 * Punctuation is removed (Sorry `C++`, you now become the same as `C`!)
 * Words are made lower-case
 * Text contained in markup tags (such as code) is removed
+* Lemmatization (So `pandas` is now `panda`)
 * Stopwords are removed (this is a delicate issue for this project, more on this later!)
 * Text is tokenized
 
