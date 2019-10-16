@@ -55,7 +55,7 @@ The problem is that any sufficiently long list of common words will likely conta
 
 Code for the slower pipeline which includes the actual direct IDF calculation is including for benchmarking purposes. It is an interesting data analytics question as to how closely we can match these two keyword extraction techniques via delicate adjustment of stopwords with a general usage IDF lookup. 
 
-#Usage and Depenencies
+## Usage and Depenencies
 
 To write to a Redis database, your `spark-submit` will require a JAR from https://mvnrepository.com/artifact/com.redislabs/spark-redis/2.3.0 . On your Spark Cluster, you should thus add the following to your `spark-submit`: `--jars /home/ubuntu/spark-redis/target/spark-redis-2.4.1-SNAPSHOT-jar-with-dependencies.jar` depending on where you downloaded the JAR to your local file. 
 
