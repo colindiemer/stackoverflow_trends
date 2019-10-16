@@ -6,22 +6,17 @@ from pyspark.sql.functions import \
     lit, array_contains, coalesce, size, when, \
     concat, length
 from pyspark.sql.functions import lower as lower_
-from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType, DoubleType
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF
+from pyspark.sql.types import ArrayType, StringType, IntegerType, MapType, DoubleType, DataType
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer
 from pyspark.ml import Pipeline
-from itertools import chain
+import nltk
+from nltk.stem import WordNetLemmatizer
 import re
 import html
 import os
-
-
-def read_tags_raw(tags_string):
-    """converts <tag1><tag2> to ['tag1', 'tag2']"""
-    return html.unescape(tags_string).strip('>').strip('<').split('><') if tags_string else []
-
-
-def read_tags():
-    return udf(read_tags_raw, ArrayType(StringType()))
+import math
+import wikiwords
+import logging
 
 
 def parse_line(line):
@@ -29,20 +24,21 @@ def parse_line(line):
     return {key: value for key, value in regex.findall(line)}
 
 
-def unescape():
-    return udf(lambda text: html.unescape(text) if text else None)
-
-
-def blank_as_null(x):
-    """Replace Null type strings with an empty string. Useful because some SparkML transformers
-    choke on Null values. """
-    return when(col(x) != "", col(x)).otherwise("")
-
-
-def convert_posts(spark, link, clean_text=True):
+def convert_posts(spark, link):
     """Reads in raw XML file of stackoverflow posts from a S3 bucket link
     and processes the XML into a spark dataframe.
     """
+
+    def read_tags_raw(tags_string):
+        """converts <tag1><tag2> to ['tag1', 'tag2']"""
+        return html.unescape(tags_string).strip('>').strip('<').split('><') if tags_string else []
+
+    def read_tags():
+        return udf(read_tags_raw, ArrayType(StringType()))
+
+    def unescape():
+        return udf(lambda text: html.unescape(text) if text else None)
+
     parsed = spark.read.text(link).where(col('value').like('%<row Id%')) \
         .select(udf(parse_line, MapType(StringType(), StringType()))('value').alias('value')) \
         .select(
@@ -66,16 +62,55 @@ def convert_posts(spark, link, clean_text=True):
         col('value.AnswerCount').cast('integer'),
         col('value.CommentCount').cast('integer'),
         col('value.FavoriteCount').cast('integer'))
-    if not clean_text:
-        return parsed
-    else:
-        return process_text(parsed)
+
+    return process_text(parsed)['Id', 'ParentId', 'PostTypeId', 'CreationDate', 'Text', 'Tags']
+
+
+def process_text(parsed_dataframe):
+    """Given a dataframe of parsed Stackoverflow posts, performs basic text cleaning operations
+     on each textual column. Also combines Title and Body into a single column Text_clean."""
+
+    def clean_string(s):
+        """Makes string lowercase, removes whitespace characters,
+        removes markup tags, and removes punctuation."""
+        s = lower_(s)
+        s = regexp_replace(s, "\n", "")
+        s = regexp_replace(s, "<[^>]*>", "")  # remove markup tags
+        s = regexp_replace(s, "[^\\w\\s]", "")  # remove punctuation
+        s = regexp_replace(s, "\b\\w{1,2}\b", "")  # remove small words
+        return s
+
+    def blank_as_null(x):
+        """Replace Null type strings with an empty string. Useful because some SparkML transformers
+        choke on Null values. """
+        return when(col(x) != "", col(x)).otherwise("")
+
+    @udf(StringType())
+    def lemmatize(text):
+        def lemma(word):
+            lemmatizer = WordNetLemmatizer()
+            return lemmatizer.lemmatize(word)
+
+        return " ".join(list(map(lemma, text.split())))
+
+    cleaned = parsed_dataframe.withColumn("Body", clean_string(parsed_dataframe['Body']))
+    cleaned = cleaned.withColumn("Title", clean_string(parsed_dataframe['Title']))
+    cleaned = cleaned.withColumn("Body", blank_as_null("Body"))
+    cleaned = cleaned.withColumn("Title", blank_as_null("Title"))
+    cleaned = cleaned.withColumn('Text_raw',
+                                 concat(col('Body'), lit(' '), col('Title')))
+    cleaned = cleaned.withColumn("CreationDate", to_date(col("CreationDate")))
+    cleaned = cleaned.withColumn('Text', lemmatize(col('Text_raw')))
+
+    return cleaned
+
 
 
 def convert_tags(spark, link):
     """Reads in raw XML file of stackoverflow tags from a S3 bucket link
     and processes the XML into a spark dataframe.
     """
+
     return spark.read.text(link).where(col('value').like('%<row Id%')) \
         .select(udf(parse_line, MapType(StringType(), StringType()))('value').alias('value')) \
         .select(
@@ -88,14 +123,9 @@ def convert_tags(spark, link):
 
 
 def extract_top_tags(converted_tags, top=100):
-    """Finds the most commonly used tags. Useful for shrinking universe of tags to consider."""
+    """Finds the most commonly used tags."""
     top = converted_tags.orderBy("Count", ascending=False).limit(top)
     return top.select("TagName").rdd.flatMap(lambda x: x).collect()
-
-
-def filter_by_date(dataframe, lower_bound="2019-01-01"):
-    """Removed posts from before a date threshold. Useful for debugging. """
-    return dataframe.filter(dataframe["CreationDate"].gt(lit(lower_bound)))
 
 
 def tag_transfer(posts):
@@ -112,65 +142,84 @@ def tag_transfer(posts):
 
 
 def select_with_tag(posts, tag):
-    return posts.where(array_contains('Tags_All', tag))
+    """Selects out those posts with a given tag"""
+    return posts.where(array_contains('Tags', tag))
 
+def total_monthly_counts_for_tag(posts_tag_selected):
+    """Produces a dataframe of monthly counts of posts. In practice only to be used on posts using a single tag"""
+    monthly_counts = posts_tag_selected.groupby("CreationDate").agg(count('CreationDate'))
+    return monthly_counts
 
-def process_text(parsed_dataframe):
-    """Given a dataframe of parsed Stackoverflow posts, performs basic text cleaning operations
-     on each textual column. Also combines Title and Body into a single column Text_clean."""
-
-    def clean_string(s):
-        """Performs the following in PySpark: makes string lowercase, removes whitespace characters,
-        removes markup tags, and removes punctuation."""
-        s = lower_(s)
-        s = regexp_replace(s, "\n", "")
-        s = regexp_replace(s, "<[^>]*>", "")  # remove markup tags
-        s = regexp_replace(s, "[^\\w\\s]", "")  # remove punctuation
-        s = regexp_replace(s, "\b\\w{1,2}\b", "")  # remove small words
-        return s
-
-    cleaned = parsed_dataframe.withColumn("Body", clean_string(parsed_dataframe['Body']))
-    cleaned = cleaned.withColumn("Title", clean_string(parsed_dataframe['Title']))
-    cleaned = cleaned.withColumn("Body", blank_as_null("Body"))
-    cleaned = cleaned.withColumn("Title", blank_as_null("Title"))
-    cleaned = cleaned.withColumn('Text',
-                                 concat(col('Body'), lit(' '), col('Title')))
-    cleaned = cleaned.withColumn("CreationDate", to_date(col("CreationDate")))
-
-    return cleaned
-
-
-def generate_stopwords(processed_tags, stopwords_file="stopwords_1000.txt"):
+def generate_stopwords(tags,
+                       stopwords_file="stopwords_10000.txt",
+                       common_tech_words_file='common_tech_words.txt',
+                       tag_min=500):
+    """Generates a list of stopwords. By default takes in the file consisting of 10,000 most commmon words.
+    To avoid throwing out too much, we repopulate with tech words coming from popular tags.
+    Unforunately, SO has some very broad tags like "file", "web" or "function", which we then re-remove."""
     stopwords = []
     with open(stopwords_file, "r") as f:
         for line in f:
             stopwords.append(line)
     stopwords = [word.strip() for word in stopwords]
-    goodwords = [row.TagName.lower() for row in processed_tags.collect()]
-    return list(set(stopwords).difference(goodwords))
+
+    tagwords = [tag.lower() for tag in extract_top_tags(tags, top=tag_min)]
+    tagwords = [tag.split('-') for tag in tagwords]
+    tagwords = [item for sublist in tagwords for item in sublist]  # flatten list
+    lemmatizer = WordNetLemmatizer()
+    tagwords = [lemmatizer.lemmatize(tag) for tag in tagwords]
+
+    too_common_tag_words = []
+    with open(common_tech_words_file, "r") as f:
+        for line in f:
+            too_common_tag_words.append(line)
+    too_common_tag_words = [word.strip() for word in too_common_tag_words]
+
+    return list(set(stopwords).difference(tagwords)) + too_common_tag_words
 
 
-def body_pipeline(cleaned_dataframe, stopwordlist):
-    """NLP pipeline. Tokenizes, removes stopwords, and computes TF-IDF
-    Returns transformed data as 'features' and the vocabulary of words."""
-
+def pipeline(cleaned_dataframe, stopwordlist=None):
+    """Pipeline for Tokenizing, removing stop words, and performing word count."""
     tokenizer = Tokenizer(inputCol="Text", outputCol="Text_tokens")
-    stop_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(), outputCol="Text_tokens_stopped",
-                                    stopWords=stopwordlist)
-    count_vect = CountVectorizer(
-        inputCol=stop_remover.getOutputCol(), outputCol="Text_counts_raw")
-    idf = IDF(inputCol=count_vect.getOutputCol(), outputCol="features")
+    if stopwordlist:
+        stop_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(), outputCol="Text_tokens_stopped",
+                                        stopWords=stopwordlist)
+    else:
+        stop_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(), outputCol="Text_tokens_stopped")
 
-    pipeline = Pipeline(stages=[tokenizer, stop_remover, count_vect, idf])
-    model = pipeline.fit(cleaned_dataframe)
+    count_vect = CountVectorizer(inputCol=stop_remover.getOutputCol(), outputCol="features")
+
+    pipe_line = Pipeline(stages=[tokenizer, stop_remover, count_vect])
+    model = pipe_line.fit(cleaned_dataframe)
     featurized_data = model.transform(cleaned_dataframe)
 
-    return featurized_data, model.stages[-2].vocabulary
+    return featurized_data, model.stages[-1].vocabulary
 
 
-def extract_top_keywords(posts, n_keywords=10):
-    """Given TF-IDF output (as "features" column) extracts out the vocabulary index of the
-    10 keywords with highest TF-IDF (for each post)."""
+def array_transform(f, t=StringType()):
+    """General use mapping udf"""
+    if not isinstance(t, DataType):
+        raise TypeError("Invalid type {}".format(type(t)))
+
+    @udf(ArrayType(t))
+    def map_(arr):
+        if arr is not None:
+            return [f(x) for x in arr]
+
+    return map_
+
+
+def idf_wiki(token):
+    """Computed IDF score based on lookup table of frequency based on Wikipedia corpus"""
+    if wikiwords.freq(token) == 0:
+        return math.log(wikiwords.N)
+    else:
+        return math.log(wikiwords.freq(token))
+
+
+def extract_top_keywords(posts, vocabulary, n_keywords=10):
+    """Given word count (Count Vectorizer) output (as "features" column) -
+    extracts out the vocabulary index of the 10 keywords with highest TF-IDF (for each post)."""
 
     def extract_keys_from_vector(vector):
         return vector.indices.tolist()
@@ -181,113 +230,134 @@ def extract_top_keywords(posts, n_keywords=10):
     extract_keys_from_vector_udf = udf(lambda vector: extract_keys_from_vector(vector), ArrayType(IntegerType()))
     extract_values_from_vector_udf = udf(lambda vector: extract_values_from_vector(vector), ArrayType(DoubleType()))
 
-    posts = posts.withColumn("extracted_keys", extract_keys_from_vector_udf("features"))
-    posts = posts.withColumn("extracted_values", extract_values_from_vector_udf("features"))
+    idf_udf = array_transform(idf_wiki)
+    vocab_dict = {k: v for k, v in enumerate(vocabulary)}
 
+    def ix_to_word(ix):
+        return vocab_dict[ix]
+
+    vocab_udf = array_transform(ix_to_word)
+
+    posts = posts.withColumn("word_ix", extract_keys_from_vector_udf("features"))
+    posts = posts.withColumn("word_count", extract_values_from_vector_udf("features"))
+    posts = posts.withColumn('words', vocab_udf(col('word_ix')))
+    posts = posts.withColumn("idf", idf_udf(col("words")))
     posts = posts.withColumn("zipped_truncated",
-                             slice(sort_array(arrays_zip("extracted_values", "extracted_keys"), asc=False), 1,
+                             slice(sort_array(arrays_zip("idf", "words"), asc=False), 1,
                                    n_keywords))
 
-    take_second = udf(lambda rows: [row[1] for row in rows], ArrayType(IntegerType()))
-    posts = posts.withColumn("top_indices", take_second("zipped_truncated"))
+    take_second = udf(lambda rows: [row[1] for row in rows], ArrayType(StringType()))
+    posts = posts.withColumn("top_keywords", take_second("zipped_truncated"))
 
-    return posts
+    return posts['CreationDate', 'top_keywords', 'Tags', 'ParentId']
 
 
-def explode_group_filter(keyword_posts, vocab, n_words=50, vocab_lookup=False):
-    """Takes in a dataframe with a top_indices column given indices of keywords for each post,
-     along with a column CreationDate of dates for the respective posts.
-    Output effectively inverts this key:value pair to produce a dataframe with one column
-    keyword_index consisting of keywords which appeared in some top_indices row, and a column
-    collect_list(CreationDate) consisting of dates on which a post was made with that keyword.
+def explode_group_filter(keyword_posts, n_keywords=50):
+    """Creates a list of the top 50 (up to some filtering) keywords by number of uses.
+    Output is a dataframe with those keywords as one column, and the time series of associate posts as another."""
+    exploded = keyword_posts.withColumn('keyword', explode('top_keywords'))
+    counted = exploded.groupby("keyword").agg(count('CreationDate'))
+    top_keywords = counted \
+        .sort('count(CreationDate)', ascending=False) \
+        .limit(n_keywords) \
+        .select("keyword").rdd.flatMap(lambda x: x).collect()
+    exploded_filtered = exploded.filter(exploded.keyword.isin(top_keywords))
+    unexploded = exploded_filtered.groupby("keyword").agg(collect_list("CreationDate"))
+    unexploded = unexploded.where(length('keyword') > 2)  # Remove confusing one or two character "keywords"
 
-    n_words parameter sets cutoff for number of keywords to consider (chosen by maximal number of posts).
-    vocab_lookup attaches a new column 'keyword_literal' giving the actual keyword (not the index).
-    """
-
-    exploded = keyword_posts.withColumn('keyword_index', explode('top_indices'))
-    unexploded = exploded.groupby("keyword_index").agg(
-        collect_list("CreationDate"))
-
-    unexploded = unexploded.withColumn('n_posts', size(col("collect_list(CreationDate)")))
-    unexploded = unexploded.sort('n_posts', ascending=False).limit(n_words)
-
-    if vocab_lookup:
-        max_index = unexploded.agg({"keyword_index": "max"}).collect()[0][0]
-        small_vocab = vocab[:max_index + 1]  # vocabulary is sorted by total word count. Only lookup possible words.
-
-        vocab_dict = {k: v for k, v in enumerate(small_vocab)}
-        vocab_mapping = create_map([lit(x) for x in chain(*vocab_dict.items())])
-        unexploded = unexploded.withColumn("keyword_literal", vocab_mapping.getItem(col("keyword_index")))
-
-    unexploded = unexploded.where(length('keyword_literal') > 1)  # Remove hard to interpret single-character keywords
     return unexploded
 
 
-def quiet_logs(spark):
-    """Reduces quantity of spark logging to make debugging simpler"""
-    logger = spark._jvm.org.apache.log4j
-    logger.LogManager.getLogger("org").setLevel(logger.Level.ERROR)
-    logger.LogManager.getLogger("akka").setLevel(logger.Level.ERROR)
-    return None
-
-
-def process_all_and_write_to_redis(
-        spark, which_tag, post_link, tags_link, redis=True, q_only=False):
+def process_all_and_write(spark, which_tag, post_link, tags_link, log, redis=True, cassandra=True, ):
     """Runs all of the processing steps defined above in order, for a given tag.
     Writes resulting dataframe to Redis.
     """
+
     processed_tags = convert_tags(spark, tags_link)
+    stopwords = generate_stopwords(processed_tags)
+
     top_tags = extract_top_tags(processed_tags)
     tag = top_tags[which_tag]
-    stopwords = generate_stopwords(processed_tags)
+
     cleaned_posts = convert_posts(spark, post_link)
 
-    if q_only:
-        questions = cleaned_posts.filter((cleaned_posts.PostTypeId == 1))
-        tag_selected = select_with_tag(questions, tag)
-        tag_selected.cache()
-        tag_selected.show()
-    else:
-        tag_transferred = tag_transfer(cleaned_posts)
-        tag_selected = select_with_tag(tag_transferred, tag)
-        tag_selected.cache()
+    tag_transferred = tag_transfer(cleaned_posts)
+    tag_selected = select_with_tag(tag_transferred, tag)
+    tag_selected.cache()
+    log.info('Posts with TAG: {} selected and text has been cleaned'.format(tag))
 
-    output_posts, vocabulary = body_pipeline(tag_selected, stopwordlist=stopwords)
+    output_posts, vocabulary = pipeline(tag_selected, stopwordlist=stopwords)
+    log.info('Posts with TAG: {} selected have been processed through TF-IDF pipeline'.format(tag))
 
-    keyworded_posts = extract_top_keywords(output_posts)['Id', 'CreationDate', 'top_indices']
-    final = explode_group_filter(keyworded_posts, vocabulary, vocab_lookup=True)
-    final = final['keyword_literal', 'collect_list(CreationDate)']
+    keyworded_posts = extract_top_keywords(output_posts, vocabulary)
 
-    print('Processing complete.')
+    final = explode_group_filter(keyworded_posts)
+    final = final \
+        .withColumn("tag", lit(tag)) \
+        .withColumnRenamed('collect_list(CreationDate)', 'dates') \
+        .where(final.keyword != '{}'.format(tag))
+
+    final_keywords = final.select("keyword").rdd.flatMap(lambda x: x).collect()
+    logger.info("Keywords extracted for TAG {0} are: {1}".format(tag, ', '.join(final_keywords)))
+
+    tag_selected.unpersist()
+
+    log.info('Top KEYWORDS for TAG: {} have been extracted and associated time series collected'.format(tag))
 
     if redis:
         final.write.format("org.apache.spark.sql.redis").option(
-            "table", "{}".format(tag)).option("key.column", "keyword_literal").mode("overwrite").save()
+            "table", "{}".format(tag)).option("key.column", "keyword").mode("overwrite").save()
 
-        print('TAG {} INSERTED INTO REDIS'.format(tag))
-    else:
-        print(tag)
-        final.show()
+        log.info('TAG: {} INSERTED INTO REDIS'.format(tag))
+
+    if cassandra:
+        final.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .mode('append') \
+            .options(table=os.environ['CASSANDRA_TABLE'], keyspace=os.environ['CASSANDRA_KEYSPACE']) \
+            .save()
+        log.info('TAG: {} INSERTED INTO CASSANDRA'.format(tag))
+
+    if (not cassandra) and (not redis):
+        log.info('No Database insertion for TAG {} performed'.format(tag))
+
+    log.info("ALL DONE WITH TAG {}".format(tag))
+    return None
+
+
+def quiet_spark_logs(spark):
+    """Reduces quantity of spark logging to make debugging simpler"""
+    spark_logger = spark._jvm.org.apache.log4j
+    spark_logger.LogManager.getLogger("org").setLevel(spark_logger.Level.ERROR)
+    spark_logger.LogManager.getLogger("akka").setLevel(spark_logger.Level.ERROR)
     return None
 
 
 if __name__ == "__main__":
-    spark_ = SparkSession.builder.appName(
-        "MainTransformation").config(
-        "spark.redis.host", os.environ["REDIS_DNS"]).config('spark.redis.db', 0).getOrCreate()
-    quiet_logs(spark_)
+    spark_ = SparkSession.builder.appName("MainTransformation") \
+        .config("spark.sql.shuffle.partitions", "500") \
+        .config("spark.redis.host", os.environ["REDIS_DNS"]) \
+        .config('spark.redis.db', os.environ["REDIS_DB"]) \
+        .config('spark.cassandra.connection.host', os.environ["CASSANDRA_DNS"]) \
+        .config('spark.cassandra.connection.port', os.environ["CASSANDRA_PORT"]) \
+        .config('spark.cassandra.output.consistency.level', 'ONE') \
+        .getOrCreate()
+
+    quiet_spark_logs(spark_)
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel("INFO")
+    formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+    file_handler = logging.FileHandler('spark_job.log')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    nltk.download("wordnet")
 
     S3_bucket = os.environ["S3_BUCKET"]
 
-    link_atoms = S3_bucket + 'two_atoms.xml'
-    link_mo = S3_bucket + 'mathoverflow/Posts.xml'
     link_all = S3_bucket + 'stackoverflow/Posts.xml'
 
-    link_mo_tags = S3_bucket + 'mathoverflow/Tags.xml'
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
-
-    process_all_and_write_to_redis(spark_, 97, link_all, link_all_tags, redis=True)
-
-    # for i in range(100):
-    #     process_all_and_write_to_redis(spark_, i, link_mo, link_mo_tags)
+    for i in range(30, 51):
+        process_all_and_write(spark_, i, link_all, link_all_tags, logger, redis=True, cassandra=False)
