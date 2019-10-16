@@ -359,5 +359,5 @@ if __name__ == "__main__":
     link_all = S3_bucket + 'stackoverflow/Posts.xml'
 
     link_all_tags = S3_bucket + 'stackoverflow/Tags.xml'
-    for i in range(30, 51):
+    for i in range(40):
         process_all_and_write(spark_, i, link_all, link_all_tags, logger, redis=True, cassandra=False)
