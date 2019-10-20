@@ -57,6 +57,8 @@ Code for the slower pipeline which includes the actual direct IDF calculation is
 
 ## Usage and Depenencies
 
+The main spark job file is `tranformation.py` in the `spark` directory. This file has dependencies on `XML_parser.py`, `generate_stopwords.py` and `process_tags.py`, so make sure that these files are included with the `--py-files` flag when running your `spark-submit`.
+
 To write to a Redis database, your `spark-submit` will require a JAR from https://mvnrepository.com/artifact/com.redislabs/spark-redis/2.3.0 . On your Spark Cluster, you should thus add the following to your `spark-submit`: `--jars /home/ubuntu/spark-redis/target/spark-redis-2.4.1-SNAPSHOT-jar-with-dependencies.jar` depending on where you downloaded the JAR to your local file. 
 
 To write to a Cassandra database, your `spark-submit` will require a JAR from datastax. This can be downloaded directly with the spark job if one adds the following to your `spark-submit`: `--packages datastax:spark-cassandra-connector:2.4.0-s_2.11`. 
