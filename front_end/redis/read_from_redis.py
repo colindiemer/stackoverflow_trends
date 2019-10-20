@@ -12,6 +12,7 @@ def redis_get_all_compound_keys(redis):
     """Extracts all (tag, keyword) pairs from redis database."""
     keys = defaultdict(list)
     for key in redis.scan_iter("*"):
+    for key in redis.scan_iter("*"):
         key_pair = tuple(key.decode("utf-8").split(':'))
         if len(key_pair) == 2:  # omit keys corresponding to schema
             keys[key_pair[0]].append(key_pair[1])
