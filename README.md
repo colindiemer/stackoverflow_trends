@@ -20,7 +20,7 @@ The files of posts and tags are stored in S3. The data transformation process ta
 
 ![Pipeline](https://i.imgur.com/dlZ2823.png)
 
-## Environment Variables and Dependencies. 
+## Environment Variables
 
 The following environment variables are used by the transformation `application.py` and the respective Redis/Cassandra front-end Dash/Plotly applications call their respective environment variables too. 
 
@@ -55,7 +55,7 @@ The problem is that any sufficiently long list of common words will likely conta
 
 Code for the slower pipeline which includes the actual direct IDF calculation is including for benchmarking purposes. It is an interesting data analytics question as to how closely we can match these two keyword extraction techniques via delicate adjustment of stopwords with a general usage IDF lookup. 
 
-## Usage and Depenencies
+## Usage and Dependencies
 
 The main spark job file is `tranformation.py` in the `spark` directory. This file has dependencies on `XML_parser.py`, `generate_stopwords.py` and `process_tags.py`, so make sure that these files are included with the `--py-files` flag when running your `spark-submit`.
 
